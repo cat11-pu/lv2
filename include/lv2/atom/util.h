@@ -156,15 +156,28 @@ lv2_atom_sequence_append_event(LV2_Atom_Sequence*    seq,
                                uint32_t              capacity,
                                const LV2_Atom_Event* event)
 {
-  const uint32_t total_size = (uint32_t)sizeof(*event) + event->body.size;
-  if (capacity - seq->atom.size < total_size) {
+  if (!seq || !event || capacity < sizeof(LV2_Atom_Sequence_Body) ||
+      seq->atom.size < sizeof(LV2_Atom_Sequence_Body) ||
+      seq->atom.size > capacity ||
+      event->body.size > UINT32_MAX - (uint32_t)sizeof(*event)) {
     return NULL;
   }
 
-  LV2_Atom_Event* e = lv2_atom_sequence_end(&seq->body, seq->atom.size);
+  const uint32_t total_size = (uint32_t)sizeof(*event) + event->body.size;
+  if (total_size > UINT32_MAX - 7U) {
+    return NULL;
+  }
+
+  const uint32_t padded_size = (total_size + 7U) & ~7U;
+  if (padded_size > capacity - seq->atom.size) {
+    return NULL;
+  }
+
+  LV2_Atom_Event* e =
+    (LV2_Atom_Event*)((uint8_t*)&seq->body + seq->atom.size);
   memcpy(e, event, total_size);
 
-  seq->atom.size += lv2_atom_pad_size(total_size);
+  seq->atom.size += padded_size;
 
   return e;
 }

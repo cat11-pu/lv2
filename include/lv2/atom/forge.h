@@ -43,7 +43,6 @@
 #include <lv2/core/attributes.h>
 #include <lv2/urid/urid.h>
 
-#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -60,6 +59,17 @@ typedef void* LV2_Atom_Forge_Sink_Handle;
 
 /** A reference to a chunk of written output. */
 typedef intptr_t LV2_Atom_Forge_Ref;
+
+/** Result of a forge operation. */
+typedef enum {
+  LV2_ATOM_FORGE_SUCCESS = 0,             /**< Operation succeeded. */
+  LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT,    /**< A required pointer was null. */
+  LV2_ATOM_FORGE_ERR_INVALID_INDEX,       /**< Buffer index out of range. */
+  LV2_ATOM_FORGE_ERR_INVALID_RESOURCE,    /**< A required URID was zero. */
+  LV2_ATOM_FORGE_ERR_INVALID_LIFECYCLE,   /**< Frames were not LIFO. */
+  LV2_ATOM_FORGE_ERR_NO_SPACE,            /**< The output buffer is full. */
+  LV2_ATOM_FORGE_ERR_OVERFLOW             /**< A size calculation overflowed. */
+} LV2_Atom_Forge_Status;
 
 /** Sink function for writing output.  See lv2_atom_forge_set_sink(). */
 typedef LV2_Atom_Forge_Ref (*LV2_Atom_Forge_Sink)(
@@ -108,10 +118,50 @@ typedef struct {
   LV2_URID URI;
   LV2_URID URID;
   LV2_URID Vector;
+
+  LV2_Atom_Forge_Status status;
 } LV2_Atom_Forge;
 
 static inline void
 lv2_atom_forge_set_buffer(LV2_Atom_Forge* forge, uint8_t* buf, size_t size);
+
+/** Return a human-readable description of a forge status. */
+static inline const char*
+lv2_atom_forge_status_string(LV2_Atom_Forge_Status status)
+{
+  switch (status) {
+  case LV2_ATOM_FORGE_SUCCESS:
+    return "success";
+  case LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT:
+    return "invalid argument";
+  case LV2_ATOM_FORGE_ERR_INVALID_INDEX:
+    return "invalid buffer index";
+  case LV2_ATOM_FORGE_ERR_INVALID_RESOURCE:
+    return "missing resource identifier";
+  case LV2_ATOM_FORGE_ERR_INVALID_LIFECYCLE:
+    return "invalid container lifecycle";
+  case LV2_ATOM_FORGE_ERR_NO_SPACE:
+    return "insufficient space";
+  case LV2_ATOM_FORGE_ERR_OVERFLOW:
+    return "size overflow";
+  }
+
+  return "unknown error";
+}
+
+/** Return the status of the last forge operation. */
+static inline LV2_Atom_Forge_Status
+lv2_atom_forge_get_status(const LV2_Atom_Forge* forge)
+{
+  return forge ? forge->status : LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+}
+
+/** Return true iff `forge` is valid and has no pending error. */
+static inline bool
+lv2_atom_forge_ok(const LV2_Atom_Forge* forge)
+{
+  return forge && forge->status == LV2_ATOM_FORGE_SUCCESS;
+}
 
 /**
    Initialise `forge`.
@@ -122,7 +172,18 @@ lv2_atom_forge_set_buffer(LV2_Atom_Forge* forge, uint8_t* buf, size_t size);
 static inline void
 lv2_atom_forge_init(LV2_Atom_Forge* forge, LV2_URID_Map* map)
 {
+  if (!forge) {
+    return;
+  }
+
+  memset(forge, 0, sizeof(*forge));
   lv2_atom_forge_set_buffer(forge, NULL, 0);
+
+  if (!map || !map->map) {
+    forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    return;
+  }
+
   forge->Blank    = map->map(map->handle, LV2_ATOM__Blank);
   forge->Bool     = map->map(map->handle, LV2_ATOM__Bool);
   forge->Chunk    = map->map(map->handle, LV2_ATOM__Chunk);
@@ -141,14 +202,48 @@ lv2_atom_forge_init(LV2_Atom_Forge* forge, LV2_URID_Map* map)
   forge->URI      = map->map(map->handle, LV2_ATOM__URI);
   forge->URID     = map->map(map->handle, LV2_ATOM__URID);
   forge->Vector   = map->map(map->handle, LV2_ATOM__Vector);
+
+  if (!forge->Blank || !forge->Bool || !forge->Chunk || !forge->Double ||
+      !forge->Float || !forge->Int || !forge->Long || !forge->Literal ||
+      !forge->Object || !forge->Path || !forge->Property || !forge->Resource ||
+      !forge->Sequence || !forge->String || !forge->Tuple || !forge->URI ||
+      !forge->URID || !forge->Vector) {
+    forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+  }
 }
 
 /** Access the Atom pointed to by a reference. */
 static inline LV2_Atom*
 lv2_atom_forge_deref(LV2_Atom_Forge* forge, LV2_Atom_Forge_Ref ref)
 {
-  // NOLINTNEXTLINE(performance-no-int-to-ptr)
-  return forge->buf ? (LV2_Atom*)ref : forge->deref(forge->handle, ref);
+  if (!forge || !ref) {
+    return NULL;
+  }
+
+  if (forge->buf) {
+    const uintptr_t begin = (uintptr_t)forge->buf;
+    const uintptr_t addr  = (uintptr_t)ref;
+    if (forge->size < sizeof(LV2_Atom) || addr < begin ||
+        addr - begin > forge->size - sizeof(LV2_Atom)) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_INDEX;
+      return NULL;
+    }
+
+    // NOLINTNEXTLINE(performance-no-int-to-ptr)
+    return (LV2_Atom*)ref;
+  }
+
+  if (!forge->deref) {
+    forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    return NULL;
+  }
+
+  LV2_Atom* atom = forge->deref(forge->handle, ref);
+  if (!atom) {
+    forge->status = LV2_ATOM_FORGE_ERR_INVALID_INDEX;
+  }
+
+  return atom;
 }
 
 /**
@@ -167,42 +262,136 @@ lv2_atom_forge_push(LV2_Atom_Forge*       forge,
                     LV2_Atom_Forge_Frame* frame,
                     LV2_Atom_Forge_Ref    ref)
 {
+  if (!forge || !frame) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+  }
+
+  for (const LV2_Atom_Forge_Frame* f = forge->stack; f; f = f->parent) {
+    if (f == frame) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_LIFECYCLE;
+      return 0;
+    }
+  }
+
   frame->parent = forge->stack;
   frame->ref    = ref;
 
   if (ref) {
+    if (!lv2_atom_forge_deref(forge, ref)) {
+      frame->ref = 0;
+      return 0;
+    }
+
     forge->stack = frame; // Don't push, so walking the stack is always safe
+    forge->status = LV2_ATOM_FORGE_SUCCESS;
+  } else if (forge->status == LV2_ATOM_FORGE_SUCCESS) {
+    forge->status = LV2_ATOM_FORGE_ERR_NO_SPACE;
   }
 
   return ref;
 }
 
-/** Pop a stack frame.  This must be called when a container is finished. */
+/** Initialise a frame as failed before validating a container operation. */
+static inline void
+lv2_atom_forge_init_frame(LV2_Atom_Forge* forge, LV2_Atom_Forge_Frame* frame)
+{
+  if (frame) {
+    frame->parent = forge ? forge->stack : NULL;
+    frame->ref    = 0;
+  }
+}
+
+/**
+   Pop a stack frame, checking that it is the current top of the stack.
+
+   This function never modifies the stack on failure, so the caller can recover
+   by popping the correct frame.
+
+   @return True on success, otherwise false.
+*/
+static inline bool
+lv2_atom_forge_pop_checked(LV2_Atom_Forge* forge, LV2_Atom_Forge_Frame* frame)
+{
+  if (!forge || !frame || !frame->ref) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    }
+    return false;
+  }
+
+  if (frame != forge->stack) {
+    forge->status = LV2_ATOM_FORGE_ERR_INVALID_LIFECYCLE;
+    return false;
+  }
+
+  const LV2_Atom_Forge_Frame* parent = frame->parent;
+  if (parent) {
+    const LV2_Atom_Forge_Frame* f = forge->stack;
+    while (f && f != parent) {
+      f = f->parent;
+    }
+
+    if (!f) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_LIFECYCLE;
+      return false;
+    }
+  }
+
+  forge->stack = frame->parent;
+  forge->status = LV2_ATOM_FORGE_SUCCESS;
+  return true;
+}
+
+/**
+   Pop a stack frame.  This must be called when a container is finished.
+
+   This compatibility wrapper is safe when called out of order: it does
+   nothing rather than corrupting the stack.  Use
+   lv2_atom_forge_pop_checked() to detect this case.
+*/
 static inline void
 lv2_atom_forge_pop(LV2_Atom_Forge* forge, LV2_Atom_Forge_Frame* frame)
 {
-  if (frame->ref) {
-    // If frame has a valid ref, it must be the top of the stack
-    assert(frame == forge->stack);
-    forge->stack = frame->parent;
+  (void)lv2_atom_forge_pop_checked(forge, frame);
+}
+
+/**
+   Abandon all open containers after an error.
+
+   This discards the frame stack and clears the error status, but leaves the
+   output position untouched.  Use lv2_atom_forge_set_buffer() to also rewind
+   and start a new graph.
+*/
+static inline void
+lv2_atom_forge_recover(LV2_Atom_Forge* forge)
+{
+  if (forge) {
+    forge->stack  = NULL;
+    forge->status = LV2_ATOM_FORGE_SUCCESS;
   }
-  // Otherwise, frame was not pushed because of overflow, do nothing
 }
 
 /** Return true iff the top of the stack has the given type. */
 static inline bool
 lv2_atom_forge_top_is(LV2_Atom_Forge* forge, uint32_t type)
 {
-  return forge->stack && forge->stack->ref &&
-         (lv2_atom_forge_deref(forge, forge->stack->ref)->type == type);
+  if (!forge || !forge->stack || !forge->stack->ref) {
+    return false;
+  }
+
+  const LV2_Atom* atom = lv2_atom_forge_deref(forge, forge->stack->ref);
+  return atom && atom->type == type;
 }
 
 /** Return true iff `type` is an atom:Object. */
 static inline bool
 lv2_atom_forge_is_object_type(const LV2_Atom_Forge* forge, uint32_t type)
 {
-  return (type == forge->Object || type == forge->Blank ||
-          type == forge->Resource);
+  return forge && (type == forge->Object || type == forge->Blank ||
+                   type == forge->Resource);
 }
 
 /** Return true iff `type` is an atom:Object with a blank ID. */
@@ -211,7 +400,8 @@ lv2_atom_forge_is_blank(const LV2_Atom_Forge*       forge,
                         uint32_t                    type,
                         const LV2_Atom_Object_Body* body)
 {
-  return (type == forge->Blank || (type == forge->Object && body->id == 0));
+  return forge && body &&
+         (type == forge->Blank || (type == forge->Object && body->id == 0));
 }
 
 /**
@@ -224,6 +414,22 @@ lv2_atom_forge_is_blank(const LV2_Atom_Forge*       forge,
 static inline void
 lv2_atom_forge_set_buffer(LV2_Atom_Forge* forge, uint8_t* buf, size_t size)
 {
+  if (!forge) {
+    return;
+  }
+
+  if (size > UINT32_MAX) {
+    forge->buf    = NULL;
+    forge->size   = 0;
+    forge->offset = 0;
+    forge->deref  = NULL;
+    forge->sink   = NULL;
+    forge->handle = NULL;
+    forge->stack  = NULL;
+    forge->status = LV2_ATOM_FORGE_ERR_INVALID_INDEX;
+    return;
+  }
+
   forge->buf    = buf;
   forge->size   = (uint32_t)size;
   forge->offset = 0;
@@ -231,6 +437,7 @@ lv2_atom_forge_set_buffer(LV2_Atom_Forge* forge, uint8_t* buf, size_t size)
   forge->sink   = NULL;
   forge->handle = NULL;
   forge->stack  = NULL;
+  forge->status = LV2_ATOM_FORGE_SUCCESS;
 }
 
 /**
@@ -253,12 +460,19 @@ lv2_atom_forge_set_sink(LV2_Atom_Forge*            forge,
                         LV2_Atom_Forge_Deref_Func  deref,
                         LV2_Atom_Forge_Sink_Handle handle)
 {
+  if (!forge) {
+    return;
+  }
+
   forge->buf  = NULL;
   forge->size = forge->offset = 0;
   forge->deref                = deref;
   forge->sink                 = sink;
   forge->handle               = handle;
   forge->stack                = NULL;
+  forge->status               = (sink && deref)
+                                  ? LV2_ATOM_FORGE_SUCCESS
+                                  : LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
 }
 
 /**
@@ -275,31 +489,99 @@ lv2_atom_forge_set_sink(LV2_Atom_Forge*            forge,
 static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_raw(LV2_Atom_Forge* forge, const void* data, uint32_t size)
 {
-  LV2_Atom_Forge_Ref out = 0;
-  if (forge->sink) {
-    out = forge->sink(forge->handle, data, size);
-  } else {
-    out          = (LV2_Atom_Forge_Ref)forge->buf + forge->offset;
-    uint8_t* mem = forge->buf + forge->offset;
-    if (forge->offset + size > forge->size) {
+  if (!forge || (size && !data)) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+  }
+
+  for (const LV2_Atom_Forge_Frame* f = forge->stack; f; f = f->parent) {
+    const LV2_Atom* atom = f->ref ? lv2_atom_forge_deref(forge, f->ref) : NULL;
+    if (!atom) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_LIFECYCLE;
       return 0;
     }
+
+    if (UINT32_MAX - atom->size < size) {
+      forge->status = LV2_ATOM_FORGE_ERR_OVERFLOW;
+      return 0;
+    }
+  }
+
+  LV2_Atom_Forge_Ref out = 0;
+  if (forge->sink) {
+    if (!forge->deref) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+      return 0;
+    }
+
+    out = forge->sink(forge->handle, data, size);
+    if (!out) {
+      forge->status = LV2_ATOM_FORGE_ERR_NO_SPACE;
+      return 0;
+    }
+  } else {
+    if (!forge->buf) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+      return 0;
+    }
+
+    if (forge->offset > forge->size) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_INDEX;
+      return 0;
+    }
+
+    if (size > forge->size - forge->offset) {
+      forge->status = LV2_ATOM_FORGE_ERR_NO_SPACE;
+      return 0;
+    }
+
+    uint8_t* const mem = forge->buf + forge->offset;
+    out                = (LV2_Atom_Forge_Ref)mem;
+
+    if (size) {
+      memcpy(mem, data, size);
+    }
     forge->offset += size;
-    memcpy(mem, data, size);
   }
+
   for (const LV2_Atom_Forge_Frame* f = forge->stack; f; f = f->parent) {
-    lv2_atom_forge_deref(forge, f->ref)->size += size;
+    LV2_Atom* const atom = lv2_atom_forge_deref(forge, f->ref);
+    if (atom) {
+      atom->size += size;
+    }
   }
+
+  forge->status = LV2_ATOM_FORGE_SUCCESS;
   return out;
 }
 
 /** Pad output accordingly so next write is 64-bit aligned. */
-static inline void
+static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_pad(LV2_Atom_Forge* forge, uint32_t written)
 {
+  if (!forge) {
+    return 0;
+  }
+
+  if (written > UINT32_MAX - 7U) {
+    forge->status = LV2_ATOM_FORGE_ERR_OVERFLOW;
+    return 0;
+  }
+
   const uint64_t pad      = 0;
-  const uint32_t pad_size = lv2_atom_pad_size(written) - written;
-  lv2_atom_forge_raw(forge, &pad, pad_size);
+  const uint32_t padded   = (written + 7U) & ~7U;
+  const uint32_t pad_size = padded - written;
+  const LV2_Atom_Forge_Status status = forge->status;
+  const LV2_Atom_Forge_Ref    out =
+    lv2_atom_forge_raw(forge, &pad, pad_size);
+  if (!out) {
+    // Padding is optional at the end of a buffer, so this is not an error.
+    forge->status = status;
+  }
+
+  return out;
 }
 
 /** Write raw output, padding to 64-bits as necessary. */
@@ -310,6 +592,7 @@ lv2_atom_forge_write(LV2_Atom_Forge* forge, const void* data, uint32_t size)
   if (out) {
     lv2_atom_forge_pad(forge, size);
   }
+
   return out;
 }
 
@@ -317,6 +600,18 @@ lv2_atom_forge_write(LV2_Atom_Forge* forge, const void* data, uint32_t size)
 static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_string_body(LV2_Atom_Forge* forge, const char* str, uint32_t len)
 {
+  if (!forge || (len && !str)) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+  }
+
+  if (len == UINT32_MAX) {
+    forge->status = LV2_ATOM_FORGE_ERR_OVERFLOW;
+    return 0;
+  }
+
   const LV2_Atom_Forge_Ref s = lv2_atom_forge_raw(forge, str, len);
   if (!s) {
     return s;
@@ -341,6 +636,13 @@ lv2_atom_forge_string_body(LV2_Atom_Forge* forge, const char* str, uint32_t len)
 static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_atom(LV2_Atom_Forge* forge, uint32_t size, uint32_t type)
 {
+  if (!forge || (size && !type)) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom a = {size, type};
   return lv2_atom_forge_raw(forge, &a, sizeof(a));
 }
@@ -349,6 +651,13 @@ lv2_atom_forge_atom(LV2_Atom_Forge* forge, uint32_t size, uint32_t type)
 static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_primitive(LV2_Atom_Forge* forge, const LV2_Atom* a)
 {
+  if (!forge || !a || (a->size && !a->type)) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   return (
     lv2_atom_forge_top_is(forge, forge->Vector)
       ? lv2_atom_forge_raw(forge, LV2_ATOM_BODY_CONST(a), a->size)
@@ -399,6 +708,13 @@ lv2_atom_forge_bool(LV2_Atom_Forge* forge, bool val)
 static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_urid(LV2_Atom_Forge* forge, LV2_URID id)
 {
+  if (!forge || !id) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_URID a = {{sizeof(id), forge->URID}, id};
   return lv2_atom_forge_primitive(forge, (const LV2_Atom*)&a);
 }
@@ -410,12 +726,27 @@ lv2_atom_forge_typed_string(LV2_Atom_Forge* forge,
                             const char*     str,
                             uint32_t        len)
 {
+  if (!forge || !type || (len && !str)) {
+    if (forge) {
+      forge->status = type ? LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT
+                           : LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
+  if (len == UINT32_MAX) {
+    forge->status = LV2_ATOM_FORGE_ERR_OVERFLOW;
+    return 0;
+  }
+
   const LV2_Atom_String a   = {{len + 1, type}};
   LV2_Atom_Forge_Ref    out = lv2_atom_forge_raw(forge, &a, sizeof(a));
   if (out) {
     if (!lv2_atom_forge_string_body(forge, str, len)) {
       LV2_Atom* atom = lv2_atom_forge_deref(forge, out);
-      atom->size = atom->type = 0;
+      if (atom) {
+        atom->size = atom->type = 0;
+      }
       out                     = 0;
     }
   }
@@ -455,6 +786,18 @@ lv2_atom_forge_literal(LV2_Atom_Forge* forge,
                        uint32_t        datatype,
                        uint32_t        lang)
 {
+  if (!forge || (len && !str)) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+  }
+
+  if (len == UINT32_MAX) {
+    forge->status = LV2_ATOM_FORGE_ERR_OVERFLOW;
+    return 0;
+  }
+
   const LV2_Atom_Literal a = {
     {(uint32_t)(sizeof(LV2_Atom_Literal) - sizeof(LV2_Atom) + len + 1),
      forge->Literal},
@@ -463,7 +806,9 @@ lv2_atom_forge_literal(LV2_Atom_Forge* forge,
   if (out) {
     if (!lv2_atom_forge_string_body(forge, str, len)) {
       LV2_Atom* atom = lv2_atom_forge_deref(forge, out);
-      atom->size = atom->type = 0;
+      if (atom) {
+        atom->size = atom->type = 0;
+      }
       out                     = 0;
     }
   }
@@ -477,6 +822,15 @@ lv2_atom_forge_vector_head(LV2_Atom_Forge*       forge,
                            uint32_t              child_size,
                            uint32_t              child_type)
 {
+  lv2_atom_forge_init_frame(forge, frame);
+  if (!forge || !frame || !child_size || !child_type) {
+    if (forge) {
+      forge->status = child_type ? LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT
+                                 : LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Vector a = {{sizeof(LV2_Atom_Vector_Body), forge->Vector},
                              {child_size, child_type}};
   return lv2_atom_forge_push(
@@ -491,6 +845,19 @@ lv2_atom_forge_vector(LV2_Atom_Forge* forge,
                       uint32_t        n_elems,
                       const void*     elems)
 {
+  if (!forge || !child_size || !child_type || (n_elems && !elems)) {
+    if (forge) {
+      forge->status = child_type ? LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT
+                                 : LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
+  if (n_elems && child_size > UINT32_MAX / n_elems) {
+    forge->status = LV2_ATOM_FORGE_ERR_OVERFLOW;
+    return 0;
+  }
+
   const LV2_Atom_Vector a = {
     {(uint32_t)sizeof(LV2_Atom_Vector_Body) + (n_elems * child_size),
      forge->Vector},
@@ -522,6 +889,14 @@ lv2_atom_forge_vector(LV2_Atom_Forge* forge,
 static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_tuple(LV2_Atom_Forge* forge, LV2_Atom_Forge_Frame* frame)
 {
+  lv2_atom_forge_init_frame(forge, frame);
+  if (!forge || !frame || !forge->Tuple) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Tuple a = {{0, forge->Tuple}};
   return lv2_atom_forge_push(
     forge, frame, lv2_atom_forge_write(forge, &a, sizeof(a)));
@@ -557,6 +932,15 @@ lv2_atom_forge_object(LV2_Atom_Forge*       forge,
                       LV2_URID              id,
                       LV2_URID              otype)
 {
+  lv2_atom_forge_init_frame(forge, frame);
+  if (!forge || !frame || !otype || !forge->Object) {
+    if (forge) {
+      forge->status = otype ? LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT
+                            : LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Object a = {
     {(uint32_t)sizeof(LV2_Atom_Object_Body), forge->Object}, {id, otype}};
   return lv2_atom_forge_push(
@@ -575,6 +959,16 @@ lv2_atom_forge_resource(LV2_Atom_Forge*       forge,
                         LV2_URID              id,
                         LV2_URID              otype)
 {
+  lv2_atom_forge_init_frame(forge, frame);
+  if (!forge || !frame || !id || !otype || !forge->Resource) {
+    if (forge) {
+      forge->status = (!id || !otype || !forge->Resource)
+                        ? LV2_ATOM_FORGE_ERR_INVALID_RESOURCE
+                        : LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Object a = {
     {(uint32_t)sizeof(LV2_Atom_Object_Body), forge->Resource}, {id, otype}};
   return lv2_atom_forge_push(
@@ -593,6 +987,15 @@ lv2_atom_forge_blank(LV2_Atom_Forge*       forge,
                      uint32_t              id,
                      LV2_URID              otype)
 {
+  lv2_atom_forge_init_frame(forge, frame);
+  if (!forge || !frame || !otype || !forge->Blank) {
+    if (forge) {
+      forge->status = otype ? LV2_ATOM_FORGE_ERR_INVALID_ARGUMENT
+                            : LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Object a = {
     {(uint32_t)sizeof(LV2_Atom_Object_Body), forge->Blank}, {id, otype}};
   return lv2_atom_forge_push(
@@ -607,6 +1010,13 @@ lv2_atom_forge_blank(LV2_Atom_Forge*       forge,
 static inline LV2_Atom_Forge_Ref
 lv2_atom_forge_key(LV2_Atom_Forge* forge, LV2_URID key)
 {
+  if (!forge || !key) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Property_Body a = {key, 0, {0, 0}};
   return lv2_atom_forge_write(forge, &a, 2 * (uint32_t)sizeof(uint32_t));
 }
@@ -622,6 +1032,13 @@ lv2_atom_forge_property_head(LV2_Atom_Forge* forge,
                              LV2_URID        key,
                              LV2_URID        context)
 {
+  if (!forge || !key) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Property_Body a = {key, context, {0, 0}};
   return lv2_atom_forge_write(forge, &a, 2 * (uint32_t)sizeof(uint32_t));
 }
@@ -634,6 +1051,14 @@ lv2_atom_forge_sequence_head(LV2_Atom_Forge*       forge,
                              LV2_Atom_Forge_Frame* frame,
                              uint32_t              unit)
 {
+  lv2_atom_forge_init_frame(forge, frame);
+  if (!forge || !frame || !forge->Sequence) {
+    if (forge) {
+      forge->status = LV2_ATOM_FORGE_ERR_INVALID_RESOURCE;
+    }
+    return 0;
+  }
+
   const LV2_Atom_Sequence a = {
     {(uint32_t)sizeof(LV2_Atom_Sequence_Body), forge->Sequence}, {unit, 0}};
   return lv2_atom_forge_push(
