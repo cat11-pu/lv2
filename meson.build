@@ -349,6 +349,7 @@ endif
 # Data and build tests
 if not get_option('tests').disabled()
   subdir('test')
+  subdir('bench')
 endif
 
 if not meson.is_subproject()
