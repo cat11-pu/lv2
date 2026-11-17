@@ -1,0 +1,171 @@
+@prefix doap: <http://usefulinc.com/ns/doap#> .
+@prefix hotswap: <http://lv2plug.in/ns/ext/hotswap#> .
+@prefix lv2: <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<http://lv2plug.in/ns/ext/hotswap>
+	a doap:Project ;
+	doap:name "LV2 Hot Swap" ;
+	doap:shortdesc "Real-time replacement of running plugin instances." ;
+	doap:created "2026-11-17" ;
+	doap:developer <http://drobilla.net/drobilla#me> ;
+	lv2:documentation """
+
+This extension defines a narrow host interface for replacing a running plugin
+instance at a block boundary.  It is intended for operations that necessarily
+require a new instance, such as changing the sample rate of a plugin whose
+sample-rate-dependent state cannot be reconfigured in place.
+
+The host performs all unbounded work, such as loading code, instantiating the
+new plugin, allocating state storage, mapping ports, and activating the new
+instance, outside the audio thread.  The real-time operation is a single
+bounded state transfer followed by publication of the prepared instance.
+
+This extension does not change the LV2 plugin ABI for hosts that do not use it.
+Plugins that want exact continuation of internal state provide the optional
+`hotswap:interface` extension data.  Hosts and plugins that do not use the
+interface are unaffected.
+
+"""^^lv2:Markdown .
+
+hotswap:interface
+	lv2:documentation """
+
+The plugin's `extension_data()` returns an `LV2_Hotswap_Plugin_Interface` when
+called with `LV2_HOTSWAP__interface`.
+
+`state_size()` is in the instantiation threading class.  The host calls it on
+both the old and new instances while preparing a swap.  The two sizes MUST
+match, and the size MUST not exceed the host's configured state budget.
+
+`save_state()` and `restore_state()` are in the audio threading class.  They
+are called by the host at a block boundary, with no `run()` in progress, first
+on the old instance and then on the new instance.  They MUST be wait-free, MUST
+NOT allocate memory, acquire locks, perform I/O, or call host callbacks, and
+MUST complete in bounded time.  A host that requires these properties sets
+`LV2_HOTSWAP_F_REQUIRE_STATE`.
+
+The plugin MUST define a stable, binary state layout identified by
+`state_version`.  Old and new instances with the same plugin URI MUST report
+the same version.  The state MUST be valid when restored into an instance
+running at a different sample rate: either the state is independent of sample
+rate, or `restore_state()` converts it.
+
+For example, an oscillator can save its phase in cycles rather than an
+accumulated frame count.  It can then continue from the same phase while using
+the phase increment for the new sample rate.
+
+"""^^lv2:Markdown .
+
+<http://lv2plug.in/ns/ext/hotswap>
+	lv2:documentation """
+
+### Host algorithm
+
+The host provides `LV2_Hotswap_Host_Interface` to its engine.  A swap has three
+phases:
+
+1. **Prepare** (non-real-time): reject an invalid target, instantiate the new
+   plugin at the new sample rate, validate the port and state metadata,
+   connect every required port to the corresponding existing host buffer,
+   allocate state storage, and activate the new instance.  The old instance,
+   host position, and event queue remain untouched.
+
+2. **Commit** (audio thread): call the plugin's `save_state()` on the old
+   instance, `restore_state()` on the new instance using the same preallocated
+   storage, and publish the new instance.  No allocation, locking, I/O, or
+   plugin lifecycle call is permitted.  The old instance is placed on a
+   deferred cleanup queue.
+
+3. **Reap** (non-real-time): call `deactivate()` and `cleanup()` for retired
+   instances.  The host SHOULD bound the retirement queue and reject
+   `prepare()` with `LV2_HOTSWAP_ERR_BUSY` if it is full.
+
+Preparation is deliberately off the audio thread, so a slow disk, allocator,
+or plugin constructor cannot cause an xrun.  Commit cost is bounded by
+`max_state_size` and is independent of block size.  The host SHOULD choose a
+state budget that fits comfortably in its shortest processing deadline.
+
+### Ports
+
+Ports are matched by `lv2:symbol`, not by index.  The old and new binaries may
+order their ports differently.  Every non-optional target port MUST have one
+mapping.  A zero `old_type` or `new_type` means the host does not know the
+type; otherwise the types MUST be equal.
+
+The host connects the new instance to the same host-owned buffers used by the
+old instance.  Audio and CV samples therefore continue at the same memory
+locations rather than being copied.  Control ports keep their current value
+for the same reason.  Output buffers MUST be cleared or initialized according
+to the host's normal policy before the first `run()` of the new instance if the
+plugin does not fully overwrite them.
+
+A missing required port, a duplicate target index, or a port type change is a
+hard error (`LV2_HOTSWAP_ERR_BAD_PORT`).  Optional ports may be omitted or
+connected to `NULL`.
+
+### Events and position
+
+Pending events are not part of an instance and MUST NOT be reset by a swap.
+The host keeps events in a queue on a fixed reference timeline, using
+`LV2_Hotswap_Position`.  `lv2_hotswap_scale_frame()` converts absolute
+reference-frame positions to plugin frames when a block is dispatched.
+
+The commit boundary is the start of a block, with a half-open interval
+`[start, end)`.  An event exactly at `start` belongs to the new instance.  All
+events remain in their original order and are delivered exactly once.
+
+The host MUST NOT recompute event timestamps by repeatedly scaling the
+previous block's timestamps.  Scaling from the fixed reference timeline once
+per dispatch avoids cumulative rounding drift.
+
+The plugin does not receive the absolute playback position through the LV2
+`run()` API.  Hosts that expose transport position to the plugin SHOULD
+include it in the plugin's migration state or deliver it as an event after the
+swap.
+
+### Continuity and failure
+
+Exact sample continuity requires:
+
+ * the same plugin URI,
+ * a complete and type-compatible port mapping,
+ * identical old/new state versions and state sizes, and
+ * a state migration implementation that is correct across sample rates.
+
+The host detects mismatches during `prepare()` and leaves the old instance
+running.  A failed `prepare()` or `commit()` MUST NOT change the active
+instance, playback position, or event queue.  `abort()` is idempotent and
+discards only the prepared instance.
+
+The interface does not crossfade.  If a plugin cannot migrate its state across
+sample rates, the host can either reject the swap with
+`LV2_HOTSWAP_F_REQUIRE_STATE`, or perform an external equal-power crossfade.
+Crossfading is a host policy and is outside this interface.
+
+### Boundary cases
+
+ * A target with a different plugin URI is rejected with
+   `LV2_HOTSWAP_ERR_BAD_PLUGIN`.
+ * A non-positive or non-finite sample rate is rejected with
+   `LV2_HOTSWAP_ERR_BAD_ARGUMENT`.
+ * `prepare()` while a swap is already prepared returns
+   `LV2_HOTSWAP_ERR_BUSY`; `commit()` without a prepared swap returns
+   `LV2_HOTSWAP_ERR_NOT_PREPARED`.
+ * `commit()` called while `run()` is active returns
+   `LV2_HOTSWAP_ERR_NOT_BOUNDARY` if the host can detect it; otherwise the host
+   MUST serialize calls externally.
+ * A state-size or state-version mismatch returns
+   `LV2_HOTSWAP_ERR_BAD_STATE`.
+ * A state larger than `max_state_size` is rejected before allocation.
+ * `abort()` after a failed prepare is harmless.
+ * A dropped event, duplicated event, or event reordered across a swap is a
+   host bug; events are never owned by the retired instance.
+ * Host-owned event queues are covered by this interface.  Plugin-internal
+   worker queues are not; the host MUST quiesce worker scheduling and drain or
+   deterministically discard pending responses before retiring an instance.
+ * Reported latency can change with the sample rate.  The host MUST refresh
+   latency compensation after the commit before trusting the new instance's
+   output timing.
+
+"""^^lv2:Markdown .

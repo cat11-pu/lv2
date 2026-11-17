@@ -12,6 +12,7 @@
 #include <lv2/dynmanifest/dynmanifest.h>         // IWYU pragma: keep
 #include <lv2/event/event-helpers.h>             // IWYU pragma: keep
 #include <lv2/event/event.h>                     // IWYU pragma: keep
+#include <lv2/hotswap/hotswap.h>                 // IWYU pragma: keep
 #include <lv2/instance-access/instance-access.h> // IWYU pragma: keep
 #include <lv2/log/log.h>                         // IWYU pragma: keep
 #include <lv2/log/logger.h>                      // IWYU pragma: keep

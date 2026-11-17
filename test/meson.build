@@ -313,6 +313,7 @@ subdir('headers')
 test_names = [
   'atom',
   'forge_overflow',
+  'hotswap',
 ]
 
 atom_test_suppressions = []
@@ -320,15 +321,22 @@ if cc.get_id() == 'gcc'
   atom_test_suppressions += ['-Wno-stringop-overflow']
 endif
 
+math_dep = cc.find_library('m', required: false)
+
 # Build and run tests
 foreach test_name : test_names
+  test_deps = [lv2_dep]
+  if test_name == 'hotswap' and math_dep.found()
+    test_deps += math_dep
+  endif
+
   test(
     test_name,
     executable(
       test_name,
       files('test_@0@.c'.format(test_name)),
       c_args: test_c_suppressions + atom_test_suppressions,
-      dependencies: [lv2_dep],
+      dependencies: test_deps,
       implicit_include_directories: false,
     ),
     suite: 'unit',

@@ -1,0 +1,16 @@
+@prefix hotswap: <http://lv2plug.in/ns/ext/hotswap#> .
+@prefix lv2: <http://lv2plug.in/ns/lv2core#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<http://lv2plug.in/ns/ext/hotswap>
+	a owl:Ontology ;
+	rdfs:label "LV2 Hot Swap" ;
+	rdfs:comment "Real-time replacement of running plugin instances." ;
+	rdfs:seeAlso <hotswap.meta.ttl> ;
+	owl:imports <http://lv2plug.in/ns/lv2core> .
+
+hotswap:interface
+	a lv2:ExtensionData ;
+	rdfs:label "interface" ;
+	rdfs:comment "A real-time-safe plugin state migration interface." .

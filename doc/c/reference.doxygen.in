@@ -810,6 +810,7 @@ INPUT                  = @LV2_SRCDIR@/doc/c/mainpage.md \
                          @LV2_SRCDIR@/include/lv2/dynmanifest/dynmanifest.h \
                          @LV2_SRCDIR@/include/lv2/event/event-helpers.h \
                          @LV2_SRCDIR@/include/lv2/event/event.h \
+                         @LV2_SRCDIR@/include/lv2/hotswap/hotswap.h \
                          @LV2_SRCDIR@/include/lv2/instance-access/instance-access.h \
                          @LV2_SRCDIR@/include/lv2/log/log.h \
                          @LV2_SRCDIR@/include/lv2/log/logger.h \

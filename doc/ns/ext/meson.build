@@ -9,6 +9,7 @@ spec_names = [
   'data-access',
   'dynmanifest',
   'event',
+  'hotswap',
   'instance-access',
   'log',
   'midi',

@@ -27,6 +27,8 @@ sord_validate \
     "$LV2DIR/dynmanifest.lv2/manifest.ttl" \
     "$LV2DIR/event.lv2/event.ttl" \
     "$LV2DIR/event.lv2/manifest.ttl" \
+    "$LV2DIR/hotswap.lv2/hotswap.ttl" \
+    "$LV2DIR/hotswap.lv2/manifest.ttl" \
     "$LV2DIR/instance-access.lv2/instance-access.ttl" \
     "$LV2DIR/instance-access.lv2/manifest.ttl" \
     "$LV2DIR/log.lv2/log.ttl" \
