@@ -73,6 +73,7 @@ endif
 #############################
 
 cc = meson.get_compiler('c')
+threads_dep = dependency('threads')
 
 if add_languages(['cpp'], native: false, required: get_option('tests'))
   cpp = meson.get_compiler('cpp')
@@ -334,3 +335,15 @@ foreach test_name : test_names
     suite: 'unit',
   )
 endforeach
+
+test(
+  'atom_event_queue',
+  executable(
+    'atom_event_queue',
+    files('test_atom_event_queue.c'),
+    c_args: test_c_suppressions,
+    dependencies: [lv2_dep, threads_dep],
+    implicit_include_directories: false,
+  ),
+  suite: 'unit',
+)

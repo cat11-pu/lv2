@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: ISC
 
 #include <lv2/atom/atom.h>                       // IWYU pragma: keep
+#include <lv2/atom/event-queue.h>                 // IWYU pragma: keep
 #include <lv2/atom/forge.h>                      // IWYU pragma: keep
 #include <lv2/atom/util.h>                       // IWYU pragma: keep
 #include <lv2/buf-size/buf-size.h>               // IWYU pragma: keep
